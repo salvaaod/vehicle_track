@@ -59,7 +59,7 @@ class Tracker:
 
     @staticmethod
     def create_session_filename() -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         return f"track_{timestamp}.kml"
 
     def load_config(self) -> Dict[str, Any]:
@@ -245,16 +245,16 @@ class Tracker:
                 "kml_file": str(DATA_DIR / self.config.get("kml_filename", KML_FILE.name)),
             }
 
-    def clear_track(self) -> None:
+    def new_track(self) -> None:
         with self.lock:
             self.points = []
             self.last_position = None
             self.last_received_position = None
             self.last_error = None
+            self.session_filename = self.create_session_filename()
+            self.config["kml_filename"] = self.session_filename
 
-        output_file = DATA_DIR / self.config.get("kml_filename", KML_FILE.name)
-        if output_file.exists():
-            output_file.unlink()
+        self.write_kml()
 
 
 tracker = Tracker()
@@ -403,7 +403,7 @@ HTML_PAGE = """
         <button onclick="clearMeasure()" type="button">Clear measure</button>
         <span id="measure_distance_display">Measure: 0 m</span>
         <button onclick="saveConfig()">Save config</button>
-        <button onclick="clearTrack()">Clear track</button>
+        <button onclick="newTrack()">New track</button>
         <a href="/download-kml">Download KML</a>
         <span id="last_position_display" class="bad">No position received</span>
     </div>
@@ -671,8 +671,8 @@ HTML_PAGE = """
             }
         }
 
-        async function clearTrack() {
-            await fetch("/api/clear-track", {method: "POST"});
+        async function newTrack() {
+            await fetch("/api/new-track", {method: "POST"});
             await refresh();
         }
 
@@ -702,9 +702,9 @@ def api_config():
     return jsonify(tracker.update_config(data))
 
 
-@app.route("/api/clear-track", methods=["POST"])
-def api_clear_track():
-    tracker.clear_track()
+@app.route("/api/new-track", methods=["POST"])
+def api_new_track():
+    tracker.new_track()
     return jsonify({"ok": True})
 
 
