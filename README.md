@@ -49,7 +49,7 @@ You can also edit `config.json` directly.
 Each time the program starts, it creates a new timestamped file in `data`, for example:
 
 ```text
-data\track_20260604_153000.kml
+data\track_20260604_153000_123456.kml
 ```
 
-You can also click **Download KML** in the web app.
+You can also click **Download KML** in the web app. Click **New track** to close the current KML file and start writing a new timestamped one.

@@ -50,6 +50,7 @@ class Tracker:
         self.config = self.load_config()
         self.points: List[TrackPoint] = []
         self.last_position: Optional[TrackPoint] = None
+        self.last_received_position: Optional[TrackPoint] = None
         self.last_error: Optional[str] = None
         self.running = True
         self.session_filename = self.create_session_filename()
@@ -58,7 +59,7 @@ class Tracker:
 
     @staticmethod
     def create_session_filename() -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         return f"track_{timestamp}.kml"
 
     def load_config(self) -> Dict[str, Any]:
@@ -135,19 +136,23 @@ class Tracker:
             lat = float(payload["lat"])
             lon = float(payload["lon"])
 
-            # Ignore zero/zero unless this is genuinely desired. It is usually "no GPS fix".
-            if lat == 0 and lon == 0:
-                raise ValueError("Received lat=0 lon=0, ignoring as invalid GPS position")
-
-            point = TrackPoint(
+            received_point = TrackPoint(
                 lat=lat,
                 lon=lon,
                 timestamp_utc=datetime.now(timezone.utc).isoformat()
             )
 
+            # Ignore zero/zero for tracking unless this is genuinely desired. It is usually "no GPS fix".
+            if lat == 0 and lon == 0:
+                with self.lock:
+                    self.last_received_position = received_point
+                    self.last_error = "No position received from device (lat=0 lon=0)"
+                return
+
             with self.lock:
-                self.last_position = point
-                self.points.append(point)
+                self.last_position = received_point
+                self.last_received_position = received_point
+                self.points.append(received_point)
                 self.last_error = None
 
             self.write_kml()
@@ -233,21 +238,23 @@ class Tracker:
                 "config": self.config.copy(),
                 "device_url": self.device_url(),
                 "last_position": asdict(self.last_position) if self.last_position else None,
+                "last_received_position": asdict(self.last_received_position) if self.last_received_position else None,
                 "last_error": self.last_error,
                 "points": [asdict(p) for p in self.points[-2000:]],
                 "point_count": len(self.points),
                 "kml_file": str(DATA_DIR / self.config.get("kml_filename", KML_FILE.name)),
             }
 
-    def clear_track(self) -> None:
+    def new_track(self) -> None:
         with self.lock:
             self.points = []
             self.last_position = None
+            self.last_received_position = None
             self.last_error = None
+            self.session_filename = self.create_session_filename()
+            self.config["kml_filename"] = self.session_filename
 
-        output_file = DATA_DIR / self.config.get("kml_filename", KML_FILE.name)
-        if output_file.exists():
-            output_file.unlink()
+        self.write_kml()
 
 
 tracker = Tracker()
@@ -308,6 +315,16 @@ HTML_PAGE = """
             color: #ffffff;
         }
 
+        #last_position_display, #measure_distance_display {
+            font-size: 13px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        #measure_distance_display {
+            color: #ffffff;
+        }
+
         #status {
             padding: 7px 10px;
             background: #fff;
@@ -329,6 +346,41 @@ HTML_PAGE = """
             color: #b00020;
             font-weight: bold;
         }
+
+        .leaflet-control-scale {
+            margin-right: 16px;
+            margin-bottom: 16px;
+        }
+
+        .leaflet-control-scale-line {
+            background: rgba(255, 255, 255, 0.9);
+            border-color: #111;
+            border-top: 0;
+            color: #111;
+            font-size: 12px;
+            font-weight: bold;
+            padding: 2px 6px 3px;
+            text-shadow: none;
+        }
+
+        .measure-active #map {
+            cursor: crosshair;
+        }
+
+        .measure-marker {
+            align-items: center;
+            background: #f2994a;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+            color: #111111;
+            display: flex;
+            font-size: 11px;
+            font-weight: bold;
+            height: 20px;
+            justify-content: center;
+            width: 20px;
+        }
     </style>
 </head>
 
@@ -347,9 +399,13 @@ HTML_PAGE = """
         </label>
 
         <button id="center_button" class="active" onclick="centerOnVehicle()" type="button" aria-pressed="true">Center</button>
+        <button id="measure_button" onclick="toggleMeasure()" type="button" aria-pressed="false" title="Click map points to measure distance">Measure</button>
+        <button onclick="clearMeasure()" type="button">Clear measure</button>
+        <span id="measure_distance_display">Measure: 0 m</span>
         <button onclick="saveConfig()">Save config</button>
-        <button onclick="clearTrack()">Clear track</button>
+        <button onclick="newTrack()">New track</button>
         <a href="/download-kml">Download KML</a>
+        <span id="last_position_display" class="bad">No position received</span>
     </div>
 
     <div id="status">Starting...</div>
@@ -365,6 +421,10 @@ HTML_PAGE = """
         let firstLoad = true;
         let centerEnabled = true;
         let suppressMoveDeselect = false;
+        let measureEnabled = false;
+        let measurePoints = [];
+        let measureLine = null;
+        let measureMarkers = [];
 
         function setStatus(html) {
             document.getElementById("status").innerHTML = html;
@@ -381,6 +441,53 @@ HTML_PAGE = """
             document.getElementById("update_seconds").value = cfg.update_seconds;
         }
 
+        function formatPosition(value) {
+            return Number(value).toFixed(7);
+        }
+
+        function formatMeasureDistance(meters) {
+            if (meters < 1000) {
+                return Math.round(meters) + " m";
+            }
+
+            return (meters / 1000).toFixed(meters < 10000 ? 2 : 1) + " km";
+        }
+
+        function measureDistanceMeters() {
+            let total = 0;
+            for (let i = 1; i < measurePoints.length; i += 1) {
+                total += measurePoints[i - 1].distanceTo(measurePoints[i]);
+            }
+            return total;
+        }
+
+        function updateMeasureDisplay() {
+            const display = document.getElementById("measure_distance_display");
+            display.textContent = "Measure: " + formatMeasureDistance(measureDistanceMeters());
+        }
+
+        function updateMeasureButton() {
+            const button = document.getElementById("measure_button");
+            button.classList.toggle("active", measureEnabled);
+            button.setAttribute("aria-pressed", measureEnabled ? "true" : "false");
+            document.body.classList.toggle("measure-active", measureEnabled);
+        }
+
+        function updateLastPositionDisplay(state) {
+            const display = document.getElementById("last_position_display");
+            const received = state.last_received_position;
+
+            if (!received || (received.lat === 0 && received.lon === 0)) {
+                display.className = "bad";
+                display.textContent = "No position received";
+                return;
+            }
+
+            display.className = "ok";
+            display.textContent = "Last position: Lat " + formatPosition(received.lat) +
+                ", Lon " + formatPosition(received.lon);
+        }
+
         function createMap(cfg, state) {
             const startLat = state.last_position ? state.last_position.lat : cfg.initial_lat;
             const startLon = state.last_position ? state.last_position.lon : cfg.initial_lon;
@@ -394,12 +501,64 @@ HTML_PAGE = """
 
             marker = L.marker([startLat, startLon]).addTo(map);
             trackLine = L.polyline([], { weight: 4 }).addTo(map);
+            measureLine = L.polyline([], {
+                color: "#f2994a",
+                dashArray: "8 6",
+                weight: 4
+            }).addTo(map);
+
+            L.control.scale({
+                position: "bottomright",
+                metric: true,
+                imperial: false,
+                maxWidth: 160
+            }).addTo(map);
 
             map.on("dragstart", function () {
                 if (!suppressMoveDeselect) {
                     setCenterEnabled(false);
                 }
             });
+
+            map.on("click", function (event) {
+                if (measureEnabled) {
+                    addMeasurePoint(event.latlng);
+                }
+            });
+        }
+
+        function addMeasurePoint(latlng) {
+            measurePoints.push(latlng);
+            measureLine.setLatLngs(measurePoints);
+
+            const marker = L.marker(latlng, {
+                icon: L.divIcon({
+                    className: "measure-marker",
+                    html: String(measurePoints.length),
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 10]
+                })
+            }).addTo(map);
+            measureMarkers.push(marker);
+            updateMeasureDisplay();
+        }
+
+        function toggleMeasure() {
+            measureEnabled = !measureEnabled;
+            updateMeasureButton();
+        }
+
+        function clearMeasure() {
+            measurePoints = [];
+            if (measureLine) {
+                measureLine.setLatLngs([]);
+            }
+
+            for (const marker of measureMarkers) {
+                marker.remove();
+            }
+            measureMarkers = [];
+            updateMeasureDisplay();
         }
 
         function updateMap(state) {
@@ -411,6 +570,8 @@ HTML_PAGE = """
             if (!map) {
                 createMap(cfg, state);
             }
+
+            updateLastPositionDisplay(state);
 
             const points = state.points.map(p => [p.lat, p.lon]);
             trackLine.setLatLngs(points);
@@ -510,8 +671,8 @@ HTML_PAGE = """
             }
         }
 
-        async function clearTrack() {
-            await fetch("/api/clear-track", {method: "POST"});
+        async function newTrack() {
+            await fetch("/api/new-track", {method: "POST"});
             await refresh();
         }
 
@@ -541,9 +702,9 @@ def api_config():
     return jsonify(tracker.update_config(data))
 
 
-@app.route("/api/clear-track", methods=["POST"])
-def api_clear_track():
-    tracker.clear_track()
+@app.route("/api/new-track", methods=["POST"])
+def api_new_track():
+    tracker.new_track()
     return jsonify({"ok": True})
 
 
