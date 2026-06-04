@@ -45,11 +45,11 @@ Use **Add vehicle** to save a new named vehicle. Use the **Vehicle** selector to
 
 The **Update seconds** value is saved as soon as the number is changed; you do not need to press **Save config** for that field.
 
-Configuration is saved when values change and again when the program closes.
+Configuration is saved when values change and again when the program closes. If `config.json` does not exist, the app creates it from the initial defaults embedded in `vehicle_track.py`.
 
 The **Center** button starts active. While active, the map keeps the current browser zoom level and centers on the vehicle when positions arrive. Moving the map automatically deselects **Center**, and incoming positions will no longer recenter the map until **Center** is pressed again.
 
-You can also edit `config.json` directly.
+You can also edit the generated `config.json` directly. The file is intentionally ignored by Git so each machine can keep its own local settings.
 
 ## KML output
 
