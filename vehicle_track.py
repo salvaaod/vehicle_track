@@ -342,6 +342,22 @@ HTML_PAGE = """
             color: #b00020;
             font-weight: bold;
         }
+
+        .leaflet-control-scale {
+            margin-right: 16px;
+            margin-bottom: 16px;
+        }
+
+        .leaflet-control-scale-line {
+            background: rgba(255, 255, 255, 0.9);
+            border-color: #111;
+            border-top: 0;
+            color: #111;
+            font-size: 12px;
+            font-weight: bold;
+            padding: 2px 6px 3px;
+            text-shadow: none;
+        }
     </style>
 </head>
 
@@ -427,6 +443,13 @@ HTML_PAGE = """
 
             marker = L.marker([startLat, startLon]).addTo(map);
             trackLine = L.polyline([], { weight: 4 }).addTo(map);
+
+            L.control.scale({
+                position: "bottomright",
+                metric: true,
+                imperial: false,
+                maxWidth: 160
+            }).addTo(map);
 
             map.on("dragstart", function () {
                 if (!suppressMoveDeselect) {
