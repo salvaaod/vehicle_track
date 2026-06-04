@@ -8,5 +8,5 @@
   "app_host": "127.0.0.1",
   "app_port": 5000,
   "request_timeout_seconds": 3,
-  "kmz_filename": "track.kmz"
+  "kml_filename": "track.kml"
 }

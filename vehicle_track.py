@@ -3,7 +3,6 @@ import os
 import threading
 import time
 import webbrowser
-import zipfile
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +15,7 @@ from flask import Flask, jsonify, request, Response, send_file
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.json"
 DATA_DIR = BASE_DIR / "data"
-KMZ_FILE = DATA_DIR / "track.kmz"
+KML_FILE = DATA_DIR / "track.kml"
 
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -34,7 +33,7 @@ DEFAULT_CONFIG = {
     "app_port": 5000,
     "request_timeout_seconds": 3,
 
-    "kmz_filename": "track.kmz"
+    "kml_filename": "track.kml"
 }
 
 
@@ -54,13 +53,13 @@ class Tracker:
         self.last_error: Optional[str] = None
         self.running = True
         self.session_filename = self.create_session_filename()
-        self.config["kmz_filename"] = self.session_filename
-        self.write_kmz()
+        self.config["kml_filename"] = self.session_filename
+        self.write_kml()
 
     @staticmethod
     def create_session_filename() -> str:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"track_{timestamp}.kmz"
+        return f"track_{timestamp}.kml"
 
     def load_config(self) -> Dict[str, Any]:
         if CONFIG_FILE.exists():
@@ -70,6 +69,9 @@ class Tracker:
             for key in DEFAULT_CONFIG:
                 if key in loaded:
                     cfg[key] = loaded[key]
+
+            if "kml_filename" not in loaded and "kmz_filename" in loaded:
+                cfg["kml_filename"] = str(loaded["kmz_filename"]).removesuffix(".kmz") + ".kml"
 
             return cfg
 
@@ -148,7 +150,7 @@ class Tracker:
                 self.points.append(point)
                 self.last_error = None
 
-            self.write_kmz()
+            self.write_kml()
 
         except Exception as exc:
             with self.lock:
@@ -168,10 +170,10 @@ class Tracker:
                 wait_seconds = max(1, float(self.config.get("update_seconds", 5)))
             next_poll_at = poll_started_at + wait_seconds
 
-    def write_kmz(self) -> None:
+    def write_kml(self) -> None:
         with self.lock:
             points_copy = list(self.points)
-            kmz_name = self.config.get("kmz_filename", KMZ_FILE.name)
+            kml_name = self.config.get("kml_filename", KML_FILE.name)
 
         coordinates = "\n".join(
             f"{p.lon},{p.lat},0" for p in points_copy
@@ -217,11 +219,11 @@ class Tracker:
 </kml>
 """
 
-        output_file = DATA_DIR / kmz_name
+        output_file = DATA_DIR / kml_name
         tmp_file = output_file.with_suffix(".tmp")
 
-        with zipfile.ZipFile(tmp_file, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            z.writestr("doc.kml", kml)
+        with tmp_file.open("w", encoding="utf-8") as f:
+            f.write(kml)
 
         os.replace(tmp_file, output_file)
 
@@ -234,7 +236,7 @@ class Tracker:
                 "last_error": self.last_error,
                 "points": [asdict(p) for p in self.points[-2000:]],
                 "point_count": len(self.points),
-                "kmz_file": str(DATA_DIR / self.config.get("kmz_filename", KMZ_FILE.name)),
+                "kml_file": str(DATA_DIR / self.config.get("kml_filename", KML_FILE.name)),
             }
 
     def clear_track(self) -> None:
@@ -243,7 +245,7 @@ class Tracker:
             self.last_position = None
             self.last_error = None
 
-        output_file = DATA_DIR / self.config.get("kmz_filename", KMZ_FILE.name)
+        output_file = DATA_DIR / self.config.get("kml_filename", KML_FILE.name)
         if output_file.exists():
             output_file.unlink()
 
@@ -257,7 +259,7 @@ HTML_PAGE = """
 <html>
 <head>
     <meta charset="utf-8">
-    <title>OSM KMZ GPS Tracker</title>
+    <title>OSM KML GPS Tracker</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <link
@@ -347,7 +349,7 @@ HTML_PAGE = """
         <button id="center_button" class="active" onclick="centerOnVehicle()" type="button" aria-pressed="true">Center</button>
         <button onclick="saveConfig()">Save config</button>
         <button onclick="clearTrack()">Clear track</button>
-        <a href="/download-kmz">Download KMZ</a>
+        <a href="/download-kml">Download KML</a>
     </div>
 
     <div id="status">Starting...</div>
@@ -438,7 +440,7 @@ HTML_PAGE = """
 
             statusHtml += "Device URL: " + state.device_url + " | ";
             statusHtml += "Track points: " + state.point_count + " | ";
-            statusHtml += "KMZ: " + state.kmz_file;
+            statusHtml += "KML: " + state.kml_file;
 
             setStatus(statusHtml);
             firstLoad = false;
@@ -545,14 +547,14 @@ def api_clear_track():
     return jsonify({"ok": True})
 
 
-@app.route("/download-kmz")
-def download_kmz():
-    path = DATA_DIR / tracker.config.get("kmz_filename", KMZ_FILE.name)
+@app.route("/download-kml")
+def download_kml():
+    path = DATA_DIR / tracker.config.get("kml_filename", KML_FILE.name)
     if not path.exists():
-        tracker.write_kmz()
+        tracker.write_kml()
 
     if not path.exists():
-        return Response("No KMZ track has been created yet.", status=404)
+        return Response("No KML track has been created yet.", status=404)
 
     return send_file(path, as_attachment=True, download_name=path.name)
 
@@ -565,12 +567,12 @@ def main() -> None:
     port = int(tracker.config.get("app_port", 5000))
 
     print()
-    print("OSM KMZ GPS Tracker")
+    print("OSM KML GPS Tracker")
     print("-------------------")
     print(f"Open this URL in your browser: http://{host}:{port}")
     print(f"Polling device: {tracker.device_url()}")
     app_url = f"http://{host}:{port}"
-    print(f"KMZ file: {DATA_DIR / tracker.config.get('kmz_filename', KMZ_FILE.name)}")
+    print(f"KML file: {DATA_DIR / tracker.config.get('kml_filename', KML_FILE.name)}")
     print()
 
     threading.Timer(1.0, lambda: webbrowser.open(app_url)).start()
