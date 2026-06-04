@@ -139,6 +139,14 @@ class Tracker:
                 return vehicle
         return self.config["vehicles"][0]
 
+    def initial_config(self) -> Dict[str, Any]:
+        return self.normalize_config(copy.deepcopy(DEFAULT_CONFIG))
+
+    @staticmethod
+    def write_config_file(config: Dict[str, Any]) -> None:
+        with CONFIG_FILE.open("w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
     def load_config(self) -> Dict[str, Any]:
         if CONFIG_FILE.exists():
             with CONFIG_FILE.open("r", encoding="utf-8") as f:
@@ -153,13 +161,12 @@ class Tracker:
 
             return self.normalize_config(cfg)
 
-        with CONFIG_FILE.open("w", encoding="utf-8") as f:
-            json.dump(DEFAULT_CONFIG, f, indent=2)
-        return copy.deepcopy(DEFAULT_CONFIG)
+        cfg = self.initial_config()
+        self.write_config_file(cfg)
+        return cfg
 
     def save_config(self) -> None:
-        with CONFIG_FILE.open("w", encoding="utf-8") as f:
-            json.dump(self.config, f, indent=2)
+        self.write_config_file(self.config)
 
     def device_url(self) -> str:
         path = str(self.config.get("location_path", "/api/v1/location"))
