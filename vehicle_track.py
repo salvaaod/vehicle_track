@@ -2,7 +2,6 @@ import json
 import os
 import threading
 import time
-import zipfile
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +14,7 @@ from flask import Flask, jsonify, request, Response, send_file
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.json"
 DATA_DIR = BASE_DIR / "data"
-KMZ_FILE = DATA_DIR / "track.kmz"
+KML_FILE = DATA_DIR / "track.kml"
 
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -26,16 +25,14 @@ DEFAULT_CONFIG = {
     "location_path": "/api/v1/location",
 
     "update_seconds": 5,
-    "zoom": 16,
     "initial_lat": 40.39169233333334,
     "initial_lon": -3.6787388333333335,
-    "auto_follow": True,
 
     "app_host": "127.0.0.1",
     "app_port": 5000,
     "request_timeout_seconds": 3,
 
-    "kmz_filename": "track.kmz"
+    "kml_filename": "track.kml"
 }
 
 
@@ -60,7 +57,13 @@ class Tracker:
             with CONFIG_FILE.open("r", encoding="utf-8") as f:
                 loaded = json.load(f)
             cfg = DEFAULT_CONFIG.copy()
-            cfg.update(loaded)
+            for key in DEFAULT_CONFIG:
+                if key in loaded:
+                    cfg[key] = loaded[key]
+
+            if "kml_filename" not in loaded and "kmz_filename" in loaded:
+                cfg["kml_filename"] = str(loaded["kmz_filename"]).removesuffix(".kmz") + ".kml"
+
             return cfg
 
         with CONFIG_FILE.open("w", encoding="utf-8") as f:
@@ -83,10 +86,8 @@ class Tracker:
             "device_port": int,
             "location_path": str,
             "update_seconds": float,
-            "zoom": int,
             "initial_lat": float,
             "initial_lon": float,
-            "auto_follow": bool,
             "request_timeout_seconds": float,
         }
 
@@ -106,11 +107,6 @@ class Tracker:
 
             if self.config["update_seconds"] < 1:
                 self.config["update_seconds"] = 1
-
-            if self.config["zoom"] < 1:
-                self.config["zoom"] = 1
-            if self.config["zoom"] > 19:
-                self.config["zoom"] = 19
 
             self.save_config()
             return self.config.copy()
@@ -143,7 +139,7 @@ class Tracker:
                 self.points.append(point)
                 self.last_error = None
 
-            self.write_kmz()
+            self.write_kml()
 
         except Exception as exc:
             with self.lock:
@@ -156,10 +152,10 @@ class Tracker:
                 wait_seconds = float(self.config.get("update_seconds", 5))
             time.sleep(max(1, wait_seconds))
 
-    def write_kmz(self) -> None:
+    def write_kml(self) -> None:
         with self.lock:
             points_copy = list(self.points)
-            kmz_name = self.config.get("kmz_filename", "track.kmz")
+            kml_name = self.config.get("kml_filename", KML_FILE.name)
 
         if not points_copy:
             return
@@ -208,11 +204,11 @@ class Tracker:
 </kml>
 """
 
-        output_file = DATA_DIR / kmz_name
+        output_file = DATA_DIR / kml_name
         tmp_file = output_file.with_suffix(".tmp")
 
-        with zipfile.ZipFile(tmp_file, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            z.writestr("doc.kml", kml)
+        with tmp_file.open("w", encoding="utf-8") as f:
+            f.write(kml)
 
         os.replace(tmp_file, output_file)
 
@@ -225,7 +221,7 @@ class Tracker:
                 "last_error": self.last_error,
                 "points": [asdict(p) for p in self.points[-2000:]],
                 "point_count": len(self.points),
-                "kmz_file": str(DATA_DIR / self.config.get("kmz_filename", "track.kmz")),
+                "kml_file": str(DATA_DIR / self.config.get("kml_filename", KML_FILE.name)),
             }
 
     def clear_track(self) -> None:
@@ -234,7 +230,7 @@ class Tracker:
             self.last_position = None
             self.last_error = None
 
-        output_file = DATA_DIR / self.config.get("kmz_filename", "track.kmz")
+        output_file = DATA_DIR / self.config.get("kml_filename", KML_FILE.name)
         if output_file.exists():
             output_file.unlink()
 
@@ -248,7 +244,7 @@ HTML_PAGE = """
 <html>
 <head>
     <meta charset="utf-8">
-    <title>OSM KMZ GPS Tracker</title>
+    <title>OSM KML GPS Tracker</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <link
@@ -292,6 +288,11 @@ HTML_PAGE = """
             border-radius: 4px;
         }
 
+        #topbar button.active {
+            background: #2f80ed;
+            color: #ffffff;
+        }
+
         #status {
             padding: 7px 10px;
             background: #fff;
@@ -330,18 +331,10 @@ HTML_PAGE = """
             <input id="update_seconds" type="number" min="1" step="1">
         </label>
 
-        <label>Zoom:
-            <input id="zoom" type="number" min="1" max="19">
-        </label>
-
-        <label>
-            <input id="auto_follow" type="checkbox" style="width:auto;">
-            Follow
-        </label>
-
+        <button id="center_button" onclick="centerOnVehicle()" type="button" aria-pressed="false">Center</button>
         <button onclick="saveConfig()">Save config</button>
         <button onclick="clearTrack()">Clear track</button>
-        <a href="/download-kmz">Download KMZ</a>
+        <a href="/download-kml">Download KML</a>
     </div>
 
     <div id="status">Starting...</div>
@@ -355,6 +348,8 @@ HTML_PAGE = """
         let trackLine;
         let refreshTimer = null;
         let firstLoad = true;
+        let centerEnabled = false;
+        let suppressMoveDeselect = false;
 
         function setStatus(html) {
             document.getElementById("status").innerHTML = html;
@@ -369,15 +364,13 @@ HTML_PAGE = """
             document.getElementById("device_ip").value = cfg.device_ip;
             document.getElementById("device_port").value = cfg.device_port;
             document.getElementById("update_seconds").value = cfg.update_seconds;
-            document.getElementById("zoom").value = cfg.zoom;
-            document.getElementById("auto_follow").checked = cfg.auto_follow;
         }
 
         function createMap(cfg, state) {
             const startLat = state.last_position ? state.last_position.lat : cfg.initial_lat;
             const startLon = state.last_position ? state.last_position.lon : cfg.initial_lon;
 
-            map = L.map("map").setView([startLat, startLon], cfg.zoom);
+            map = L.map("map").setView([startLat, startLon], 16);
 
             L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
                 maxZoom: 19,
@@ -386,11 +379,19 @@ HTML_PAGE = """
 
             marker = L.marker([startLat, startLon]).addTo(map);
             trackLine = L.polyline([], { weight: 4 }).addTo(map);
+
+            map.on("dragstart", function () {
+                if (!suppressMoveDeselect) {
+                    setCenterEnabled(false);
+                }
+            });
         }
 
         function updateMap(state) {
             const cfg = state.config;
-            fillConfigInputs(cfg);
+            if (firstLoad) {
+                fillConfigInputs(cfg);
+            }
 
             if (!map) {
                 createMap(cfg, state);
@@ -408,8 +409,10 @@ HTML_PAGE = """
                     "<br>UTC: " + state.last_position.timestamp_utc
                 );
 
-                if (cfg.auto_follow || firstLoad) {
-                    map.setView(latlon, cfg.zoom);
+                if (centerEnabled || firstLoad) {
+                    suppressMoveDeselect = true;
+                    map.setView(latlon, map.getZoom());
+                    suppressMoveDeselect = false;
                 }
             }
 
@@ -422,7 +425,7 @@ HTML_PAGE = """
 
             statusHtml += "Device URL: " + state.device_url + " | ";
             statusHtml += "Track points: " + state.point_count + " | ";
-            statusHtml += "KMZ: " + state.kmz_file;
+            statusHtml += "KML: " + state.kml_file;
 
             setStatus(statusHtml);
             firstLoad = false;
@@ -451,18 +454,33 @@ HTML_PAGE = """
             const body = {
                 device_ip: document.getElementById("device_ip").value,
                 device_port: Number(document.getElementById("device_port").value),
-                update_seconds: Number(document.getElementById("update_seconds").value),
-                zoom: Number(document.getElementById("zoom").value),
-                auto_follow: document.getElementById("auto_follow").checked
+                update_seconds: Number(document.getElementById("update_seconds").value)
             };
 
-            await fetch("/api/config", {
+            const response = await fetch("/api/config", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify(body)
             });
 
+            fillConfigInputs(await response.json());
             await refresh();
+        }
+
+        function setCenterEnabled(enabled) {
+            centerEnabled = enabled;
+            const button = document.getElementById("center_button");
+            button.classList.toggle("active", centerEnabled);
+            button.setAttribute("aria-pressed", centerEnabled ? "true" : "false");
+        }
+
+        function centerOnVehicle() {
+            setCenterEnabled(true);
+            if (marker && map) {
+                suppressMoveDeselect = true;
+                map.setView(marker.getLatLng(), map.getZoom());
+                suppressMoveDeselect = false;
+            }
         }
 
         async function clearTrack() {
@@ -502,14 +520,14 @@ def api_clear_track():
     return jsonify({"ok": True})
 
 
-@app.route("/download-kmz")
-def download_kmz():
-    path = DATA_DIR / tracker.config.get("kmz_filename", "track.kmz")
+@app.route("/download-kml")
+def download_kml():
+    path = DATA_DIR / tracker.config.get("kml_filename", KML_FILE.name)
     if not path.exists():
-        tracker.write_kmz()
+        tracker.write_kml()
 
     if not path.exists():
-        return Response("No KMZ track has been created yet. Wait until at least one valid position is received.", status=404)
+        return Response("No KML track has been created yet. Wait until at least one valid position is received.", status=404)
 
     return send_file(path, as_attachment=True, download_name=path.name)
 
@@ -522,11 +540,11 @@ def main() -> None:
     port = int(tracker.config.get("app_port", 5000))
 
     print()
-    print("OSM KMZ GPS Tracker")
+    print("OSM KML GPS Tracker")
     print("-------------------")
     print(f"Open this URL in your browser: http://{host}:{port}")
     print(f"Polling device: {tracker.device_url()}")
-    print(f"KMZ file: {DATA_DIR / tracker.config.get('kmz_filename', 'track.kmz')}")
+    print(f"KML file: {DATA_DIR / tracker.config.get('kml_filename', KML_FILE.name)}")
     print()
 
     app.run(host=host, port=port, debug=False, use_reloader=False)
