@@ -1,11 +1,12 @@
-# OSM KML GPS Tracker
+# OSM KMZ GPS Tracker
 
 Small Python app that:
 
 - Polls `http://<device_ip>:<device_port>/api/v1/location`
 - Shows the position on an OpenStreetMap / Leaflet map
 - Updates every configurable number of seconds
-- Stores the GPS history as a KML file
+- Stores each run's GPS history as a timestamped KMZ file
+- Opens the web page automatically when the program starts
 
 ## Install
 
@@ -23,7 +24,7 @@ pip install -r requirements.txt
 python vehicle_track.py
 ```
 
-Then open:
+The app automatically opens the browser. You can also open it manually:
 
 ```text
 http://127.0.0.1:5000
@@ -37,16 +38,18 @@ You can configure from the web page:
 - Device port
 - Update seconds
 
-The **Center** button keeps the current browser zoom level and centers the map on the vehicle. Moving or zooming the map automatically deselects **Center**, and incoming positions will no longer recenter the map until **Center** is pressed again.
+The **Update seconds** value is saved as soon as the number is changed; you do not need to press **Save config** for that field.
+
+The **Center** button starts active. While active, the map keeps the current browser zoom level and centers on the vehicle when positions arrive. Moving the map automatically deselects **Center**, and incoming positions will no longer recenter the map until **Center** is pressed again.
 
 You can also edit `config.json` directly.
 
-## KML output
+## KMZ output
 
-The file is saved here while the app is running:
+Each time the program starts, it creates a new timestamped file in `data`, for example:
 
 ```text
-data\track.kml
+data\track_20260604_153000.kmz
 ```
 
-You can also click **Download KML** in the web app.
+You can also click **Download KMZ** in the web app.
