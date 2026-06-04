@@ -1,0 +1,14 @@
+{
+  "device_ip": "10.58.1.116",
+  "device_port": 8041,
+  "location_path": "/api/v1/location",
+  "update_seconds": 5.0,
+  "zoom": 16,
+  "initial_lat": 40.39169233333334,
+  "initial_lon": -3.6787388333333335,
+  "auto_follow": false,
+  "app_host": "127.0.0.1",
+  "app_port": 5000,
+  "request_timeout_seconds": 3,
+  "kmz_filename": "track.kmz"
+}
