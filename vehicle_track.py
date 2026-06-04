@@ -315,10 +315,14 @@ HTML_PAGE = """
             color: #ffffff;
         }
 
-        #last_position_display {
+        #last_position_display, #measure_distance_display {
             font-size: 13px;
             font-weight: bold;
             white-space: nowrap;
+        }
+
+        #measure_distance_display {
+            color: #ffffff;
         }
 
         #status {
@@ -358,6 +362,25 @@ HTML_PAGE = """
             padding: 2px 6px 3px;
             text-shadow: none;
         }
+
+        .measure-active #map {
+            cursor: crosshair;
+        }
+
+        .measure-marker {
+            align-items: center;
+            background: #f2994a;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+            color: #111111;
+            display: flex;
+            font-size: 11px;
+            font-weight: bold;
+            height: 20px;
+            justify-content: center;
+            width: 20px;
+        }
     </style>
 </head>
 
@@ -376,6 +399,9 @@ HTML_PAGE = """
         </label>
 
         <button id="center_button" class="active" onclick="centerOnVehicle()" type="button" aria-pressed="true">Center</button>
+        <button id="measure_button" onclick="toggleMeasure()" type="button" aria-pressed="false" title="Click map points to measure distance">Measure</button>
+        <button onclick="clearMeasure()" type="button">Clear measure</button>
+        <span id="measure_distance_display">Measure: 0 m</span>
         <button onclick="saveConfig()">Save config</button>
         <button onclick="clearTrack()">Clear track</button>
         <a href="/download-kml">Download KML</a>
@@ -395,6 +421,10 @@ HTML_PAGE = """
         let firstLoad = true;
         let centerEnabled = true;
         let suppressMoveDeselect = false;
+        let measureEnabled = false;
+        let measurePoints = [];
+        let measureLine = null;
+        let measureMarkers = [];
 
         function setStatus(html) {
             document.getElementById("status").innerHTML = html;
@@ -413,6 +443,34 @@ HTML_PAGE = """
 
         function formatPosition(value) {
             return Number(value).toFixed(7);
+        }
+
+        function formatMeasureDistance(meters) {
+            if (meters < 1000) {
+                return Math.round(meters) + " m";
+            }
+
+            return (meters / 1000).toFixed(meters < 10000 ? 2 : 1) + " km";
+        }
+
+        function measureDistanceMeters() {
+            let total = 0;
+            for (let i = 1; i < measurePoints.length; i += 1) {
+                total += measurePoints[i - 1].distanceTo(measurePoints[i]);
+            }
+            return total;
+        }
+
+        function updateMeasureDisplay() {
+            const display = document.getElementById("measure_distance_display");
+            display.textContent = "Measure: " + formatMeasureDistance(measureDistanceMeters());
+        }
+
+        function updateMeasureButton() {
+            const button = document.getElementById("measure_button");
+            button.classList.toggle("active", measureEnabled);
+            button.setAttribute("aria-pressed", measureEnabled ? "true" : "false");
+            document.body.classList.toggle("measure-active", measureEnabled);
         }
 
         function updateLastPositionDisplay(state) {
@@ -443,6 +501,11 @@ HTML_PAGE = """
 
             marker = L.marker([startLat, startLon]).addTo(map);
             trackLine = L.polyline([], { weight: 4 }).addTo(map);
+            measureLine = L.polyline([], {
+                color: "#f2994a",
+                dashArray: "8 6",
+                weight: 4
+            }).addTo(map);
 
             L.control.scale({
                 position: "bottomright",
@@ -456,6 +519,46 @@ HTML_PAGE = """
                     setCenterEnabled(false);
                 }
             });
+
+            map.on("click", function (event) {
+                if (measureEnabled) {
+                    addMeasurePoint(event.latlng);
+                }
+            });
+        }
+
+        function addMeasurePoint(latlng) {
+            measurePoints.push(latlng);
+            measureLine.setLatLngs(measurePoints);
+
+            const marker = L.marker(latlng, {
+                icon: L.divIcon({
+                    className: "measure-marker",
+                    html: String(measurePoints.length),
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 10]
+                })
+            }).addTo(map);
+            measureMarkers.push(marker);
+            updateMeasureDisplay();
+        }
+
+        function toggleMeasure() {
+            measureEnabled = !measureEnabled;
+            updateMeasureButton();
+        }
+
+        function clearMeasure() {
+            measurePoints = [];
+            if (measureLine) {
+                measureLine.setLatLngs([]);
+            }
+
+            for (const marker of measureMarkers) {
+                marker.remove();
+            }
+            measureMarkers = [];
+            updateMeasureDisplay();
         }
 
         function updateMap(state) {
