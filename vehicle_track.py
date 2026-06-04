@@ -1,12 +1,17 @@
+import atexit
+import copy
 import json
 import os
+import re
+import signal
 import threading
 import time
 import webbrowser
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from xml.sax.saxutils import escape
 
 import requests
 from flask import Flask, jsonify, request, Response, send_file
@@ -23,6 +28,14 @@ DATA_DIR.mkdir(exist_ok=True)
 DEFAULT_CONFIG = {
     "device_ip": "10.58.1.116",
     "device_port": 8041,
+    "selected_vehicle": "Default vehicle",
+    "vehicles": [
+        {
+            "name": "Default vehicle",
+            "ip": "10.58.1.116",
+            "port": 8041
+        }
+    ],
     "location_path": "/api/v1/location",
 
     "update_seconds": 5,
@@ -41,32 +54,96 @@ DEFAULT_CONFIG = {
 class TrackPoint:
     lat: float
     lon: float
-    timestamp_utc: str
+    timestamp_local: str
 
 
 class Tracker:
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.config = self.load_config()
         self.points: List[TrackPoint] = []
         self.last_position: Optional[TrackPoint] = None
         self.last_received_position: Optional[TrackPoint] = None
         self.last_error: Optional[str] = None
         self.running = True
-        self.session_filename = self.create_session_filename()
+        self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
         self.config["kml_filename"] = self.session_filename
+        self.save_config()
         self.write_kml()
 
     @staticmethod
-    def create_session_filename() -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        return f"track_{timestamp}.kml"
+    def local_timestamp() -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    @staticmethod
+    def safe_filename_part(value: Any) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "vehicle")).strip("._-")
+        return cleaned or "vehicle"
+
+    def create_session_filename(self, vehicle_name: Optional[str] = None) -> str:
+        timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+        vehicle_part = self.safe_filename_part(vehicle_name or self.config.get("selected_vehicle"))
+        return f"track_{vehicle_part}_{timestamp}.kml"
+
+    @staticmethod
+    def vehicle_name_from_entry(vehicle: Dict[str, Any], fallback: str) -> str:
+        name = str(vehicle.get("name", "")).strip()
+        return name or fallback
+
+    def normalize_config(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        vehicles = []
+        for index, vehicle in enumerate(cfg.get("vehicles", [])):
+            if not isinstance(vehicle, dict):
+                continue
+
+            try:
+                port = int(vehicle.get("port", cfg.get("device_port", DEFAULT_CONFIG["device_port"])))
+            except (TypeError, ValueError):
+                port = int(DEFAULT_CONFIG["device_port"])
+
+            vehicles.append({
+                "name": self.vehicle_name_from_entry(vehicle, f"Vehicle {index + 1}"),
+                "ip": str(vehicle.get("ip", cfg.get("device_ip", DEFAULT_CONFIG["device_ip"]))).strip(),
+                "port": port,
+            })
+
+        if not vehicles:
+            vehicles.append({
+                "name": str(cfg.get("selected_vehicle") or "Default vehicle"),
+                "ip": str(cfg.get("device_ip", DEFAULT_CONFIG["device_ip"])).strip(),
+                "port": int(cfg.get("device_port", DEFAULT_CONFIG["device_port"])),
+            })
+
+        selected = str(cfg.get("selected_vehicle") or vehicles[0]["name"]).strip()
+        if selected not in {vehicle["name"] for vehicle in vehicles}:
+            selected = vehicles[0]["name"]
+
+        cfg["vehicles"] = vehicles
+        cfg["selected_vehicle"] = selected
+        self.sync_selected_vehicle_fields(cfg)
+        return cfg
+
+    @staticmethod
+    def sync_selected_vehicle_fields(cfg: Dict[str, Any]) -> None:
+        selected = cfg.get("selected_vehicle")
+        for vehicle in cfg.get("vehicles", []):
+            if vehicle.get("name") == selected:
+                cfg["device_ip"] = vehicle["ip"]
+                cfg["device_port"] = vehicle["port"]
+                return
+
+    def selected_vehicle(self) -> Dict[str, Any]:
+        selected = self.config.get("selected_vehicle")
+        for vehicle in self.config.get("vehicles", []):
+            if vehicle.get("name") == selected:
+                return vehicle
+        return self.config["vehicles"][0]
 
     def load_config(self) -> Dict[str, Any]:
         if CONFIG_FILE.exists():
             with CONFIG_FILE.open("r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            cfg = DEFAULT_CONFIG.copy()
+            cfg = copy.deepcopy(DEFAULT_CONFIG)
             for key in DEFAULT_CONFIG:
                 if key in loaded:
                     cfg[key] = loaded[key]
@@ -74,11 +151,11 @@ class Tracker:
             if "kml_filename" not in loaded and "kmz_filename" in loaded:
                 cfg["kml_filename"] = str(loaded["kmz_filename"]).removesuffix(".kmz") + ".kml"
 
-            return cfg
+            return self.normalize_config(cfg)
 
         with CONFIG_FILE.open("w", encoding="utf-8") as f:
             json.dump(DEFAULT_CONFIG, f, indent=2)
-        return DEFAULT_CONFIG.copy()
+        return copy.deepcopy(DEFAULT_CONFIG)
 
     def save_config(self) -> None:
         with CONFIG_FILE.open("w", encoding="utf-8") as f:
@@ -88,12 +165,36 @@ class Tracker:
         path = str(self.config.get("location_path", "/api/v1/location"))
         if not path.startswith("/"):
             path = "/" + path
-        return f"http://{self.config['device_ip']}:{int(self.config['device_port'])}{path}"
+        vehicle = self.selected_vehicle()
+        return f"http://{vehicle['ip']}:{int(vehicle['port'])}{path}"
+
+    def update_current_vehicle(self, partial: Dict[str, Any]) -> None:
+        vehicle = self.selected_vehicle()
+        old_name = vehicle["name"]
+        new_name = old_name
+
+        if "vehicle_name" in partial:
+            proposed_name = str(partial["vehicle_name"]).strip()
+            if proposed_name:
+                new_name = proposed_name
+
+        if old_name != new_name:
+            for other in self.config["vehicles"]:
+                if other is not vehicle and other["name"] == new_name:
+                    raise ValueError(f"A vehicle named '{new_name}' already exists.")
+
+            vehicle["name"] = new_name
+            self.config["selected_vehicle"] = new_name
+
+        if "device_ip" in partial:
+            vehicle["ip"] = str(partial["device_ip"]).strip()
+        if "device_port" in partial:
+            vehicle["port"] = int(partial["device_port"])
+
+        self.sync_selected_vehicle_fields(self.config)
 
     def update_config(self, partial: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {
-            "device_ip": str,
-            "device_port": int,
             "location_path": str,
             "update_seconds": float,
             "initial_lat": float,
@@ -102,6 +203,9 @@ class Tracker:
         }
 
         with self.lock:
+            if any(key in partial for key in ("vehicle_name", "device_ip", "device_port")):
+                self.update_current_vehicle(partial)
+
             for key, converter in allowed.items():
                 if key in partial:
                     value = partial[key]
@@ -121,6 +225,60 @@ class Tracker:
             self.save_config()
             return self.config.copy()
 
+    def add_vehicle(self, vehicle: Dict[str, Any]) -> Dict[str, Any]:
+        name = str(vehicle.get("name", "")).strip()
+        ip = str(vehicle.get("ip", "")).strip()
+        if not name:
+            raise ValueError("Vehicle name is required.")
+        if not ip:
+            raise ValueError("Vehicle IP is required.")
+
+        try:
+            port = int(vehicle.get("port"))
+        except (TypeError, ValueError):
+            raise ValueError("Vehicle port is required.") from None
+
+        new_vehicle = {
+            "name": name,
+            "ip": ip,
+            "port": port,
+        }
+
+        with self.lock:
+            if any(existing["name"] == name for existing in self.config["vehicles"]):
+                raise ValueError(f"A vehicle named '{name}' already exists.")
+
+            self.config["vehicles"].append(new_vehicle)
+            self.config["selected_vehicle"] = name
+            self.sync_selected_vehicle_fields(self.config)
+            self.start_new_track_locked()
+            self.save_config()
+
+        self.write_kml()
+        return self.config.copy()
+
+    def select_vehicle(self, name: str) -> Dict[str, Any]:
+        selected_name = str(name).strip()
+        if not selected_name:
+            raise ValueError("Vehicle name is required.")
+
+        should_restart = False
+        with self.lock:
+            if not any(vehicle["name"] == selected_name for vehicle in self.config["vehicles"]):
+                raise ValueError(f"Unknown vehicle '{selected_name}'.")
+
+            if self.config.get("selected_vehicle") != selected_name:
+                self.config["selected_vehicle"] = selected_name
+                self.sync_selected_vehicle_fields(self.config)
+                self.start_new_track_locked()
+                should_restart = True
+
+            self.save_config()
+
+        if should_restart:
+            self.write_kml()
+        return self.config.copy()
+
     def poll_once(self) -> None:
         with self.lock:
             url = self.device_url()
@@ -139,7 +297,7 @@ class Tracker:
             received_point = TrackPoint(
                 lat=lat,
                 lon=lon,
-                timestamp_utc=datetime.now(timezone.utc).isoformat()
+                timestamp_local=self.local_timestamp()
             )
 
             # Ignore zero/zero for tracking unless this is genuinely desired. It is usually "no GPS fix".
@@ -179,6 +337,7 @@ class Tracker:
         with self.lock:
             points_copy = list(self.points)
             kml_name = self.config.get("kml_filename", KML_FILE.name)
+            vehicle_name = self.config.get("selected_vehicle", "Vehicle")
 
         coordinates = "\n".join(
             f"{p.lon},{p.lat},0" for p in points_copy
@@ -187,8 +346,8 @@ class Tracker:
         placemarks = "\n".join(
             f"""
             <Placemark>
-                <name>{p.timestamp_utc}</name>
-                <TimeStamp><when>{p.timestamp_utc}</when></TimeStamp>
+                <name>{escape(p.timestamp_local)}</name>
+                <TimeStamp><when>{escape(p.timestamp_local)}</when></TimeStamp>
                 <Point><coordinates>{p.lon},{p.lat},0</coordinates></Point>
             </Placemark>
             """
@@ -198,7 +357,7 @@ class Tracker:
         kml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document>
-    <name>Live GPS Track</name>
+    <name>{escape(vehicle_name)} Live GPS Track</name>
 
     <Style id="trackStyle">
         <LineStyle>
@@ -208,7 +367,7 @@ class Tracker:
     </Style>
 
     <Placemark>
-        <name>GPS Track</name>
+        <name>{escape(vehicle_name)} GPS Track</name>
         <styleUrl>#trackStyle</styleUrl>
         <LineString>
             <tessellate>1</tessellate>
@@ -237,6 +396,7 @@ class Tracker:
             return {
                 "config": self.config.copy(),
                 "device_url": self.device_url(),
+                "selected_vehicle": self.selected_vehicle().copy(),
                 "last_position": asdict(self.last_position) if self.last_position else None,
                 "last_received_position": asdict(self.last_received_position) if self.last_received_position else None,
                 "last_error": self.last_error,
@@ -245,20 +405,39 @@ class Tracker:
                 "kml_file": str(DATA_DIR / self.config.get("kml_filename", KML_FILE.name)),
             }
 
+    def start_new_track_locked(self) -> None:
+        self.points = []
+        self.last_position = None
+        self.last_received_position = None
+        self.last_error = None
+        self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
+        self.config["kml_filename"] = self.session_filename
+
     def new_track(self) -> None:
         with self.lock:
-            self.points = []
-            self.last_position = None
-            self.last_received_position = None
-            self.last_error = None
-            self.session_filename = self.create_session_filename()
-            self.config["kml_filename"] = self.session_filename
+            self.start_new_track_locked()
+            self.save_config()
 
         self.write_kml()
+
+    def shutdown(self) -> None:
+        with self.lock:
+            self.running = False
+            self.save_config()
 
 
 tracker = Tracker()
 app = Flask(__name__)
+atexit.register(tracker.shutdown)
+
+
+def handle_shutdown_signal(signum, frame) -> None:
+    tracker.shutdown()
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGINT, handle_shutdown_signal)
+signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
 
 HTML_PAGE = """
@@ -295,7 +474,7 @@ HTML_PAGE = """
             font-size: 13px;
         }
 
-        #topbar input {
+        #topbar input, #topbar select {
             width: 115px;
             padding: 4px;
         }
@@ -386,6 +565,14 @@ HTML_PAGE = """
 
 <body>
     <div id="topbar">
+        <label>Vehicle:
+            <select id="vehicle_select" onchange="vehicleSelected()"></select>
+        </label>
+
+        <label>Name:
+            <input id="vehicle_name">
+        </label>
+
         <label>Device IP:
             <input id="device_ip">
         </label>
@@ -403,6 +590,7 @@ HTML_PAGE = """
         <button onclick="clearMeasure()" type="button">Clear measure</button>
         <span id="measure_distance_display">Measure: 0 m</span>
         <button onclick="saveConfig()">Save config</button>
+        <button onclick="addVehicle()">Add vehicle</button>
         <button onclick="newTrack()">New track</button>
         <a href="/download-kml">Download KML</a>
         <span id="last_position_display" class="bad">No position received</span>
@@ -436,6 +624,18 @@ HTML_PAGE = """
         }
 
         function fillConfigInputs(cfg) {
+            const vehicleSelect = document.getElementById("vehicle_select");
+            vehicleSelect.innerHTML = "";
+            for (const vehicle of cfg.vehicles || []) {
+                const option = document.createElement("option");
+                option.value = vehicle.name;
+                option.textContent = vehicle.name;
+                option.selected = vehicle.name === cfg.selected_vehicle;
+                vehicleSelect.appendChild(option);
+            }
+
+            const selectedVehicle = (cfg.vehicles || []).find(vehicle => vehicle.name === cfg.selected_vehicle) || {};
+            document.getElementById("vehicle_name").value = selectedVehicle.name || cfg.selected_vehicle || "";
             document.getElementById("device_ip").value = cfg.device_ip;
             document.getElementById("device_port").value = cfg.device_port;
             document.getElementById("update_seconds").value = cfg.update_seconds;
@@ -582,7 +782,7 @@ HTML_PAGE = """
                 marker.bindPopup(
                     "Lat: " + state.last_position.lat.toFixed(7) +
                     "<br>Lon: " + state.last_position.lon.toFixed(7) +
-                    "<br>UTC: " + state.last_position.timestamp_utc
+                    "<br>Local time: " + state.last_position.timestamp_local
                 );
 
                 if (centerEnabled || firstLoad) {
@@ -600,6 +800,7 @@ HTML_PAGE = """
             }
 
             statusHtml += "Device URL: " + state.device_url + " | ";
+            statusHtml += "Vehicle: " + state.config.selected_vehicle + " | ";
             statusHtml += "Track points: " + state.point_count + " | ";
             statusHtml += "KML: " + state.kml_file;
 
@@ -640,6 +841,7 @@ HTML_PAGE = """
 
         async function saveConfig() {
             const body = {
+                vehicle_name: document.getElementById("vehicle_name").value,
                 device_ip: document.getElementById("device_ip").value,
                 device_port: Number(document.getElementById("device_port").value),
                 update_seconds: Number(document.getElementById("update_seconds").value)
@@ -650,6 +852,44 @@ HTML_PAGE = """
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify(body)
             });
+
+            fillConfigInputs(await response.json());
+            await refresh();
+        }
+
+        async function addVehicle() {
+            const response = await fetch("/api/vehicles", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    name: document.getElementById("vehicle_name").value,
+                    ip: document.getElementById("device_ip").value,
+                    port: Number(document.getElementById("device_port").value)
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                setStatus('<span class="bad">ERROR:</span> ' + error.error);
+                return;
+            }
+
+            fillConfigInputs(await response.json());
+            await refresh();
+        }
+
+        async function vehicleSelected() {
+            const response = await fetch("/api/select-vehicle", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({name: document.getElementById("vehicle_select").value})
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                setStatus('<span class="bad">ERROR:</span> ' + error.error);
+                return;
+            }
 
             fillConfigInputs(await response.json());
             await refresh();
@@ -699,7 +939,28 @@ def api_config():
         return jsonify(tracker.state()["config"])
 
     data = request.get_json(force=True, silent=True) or {}
-    return jsonify(tracker.update_config(data))
+    try:
+        return jsonify(tracker.update_config(data))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/vehicles", methods=["POST"])
+def api_vehicles():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(tracker.add_vehicle(data))
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/select-vehicle", methods=["POST"])
+def api_select_vehicle():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(tracker.select_vehicle(data.get("name", "")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/new-track", methods=["POST"])
@@ -737,7 +998,10 @@ def main() -> None:
     print()
 
     threading.Timer(1.0, lambda: webbrowser.open(app_url)).start()
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+    try:
+        app.run(host=host, port=port, debug=False, use_reloader=False)
+    finally:
+        tracker.shutdown()
 
 
 if __name__ == "__main__":

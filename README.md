@@ -6,6 +6,7 @@ Small Python app that:
 - Shows the position on an OpenStreetMap / Leaflet map
 - Updates every configurable number of seconds
 - Stores each run's GPS history as a timestamped KML file
+- Saves multiple named vehicles, each with its own IP and port
 - Opens the web page automatically when the program starts
 
 ## Install
@@ -34,11 +35,17 @@ http://127.0.0.1:5000
 
 You can configure from the web page:
 
+- Vehicle selector
+- Vehicle name
 - Device IP
 - Device port
 - Update seconds
 
+Use **Add vehicle** to save a new named vehicle. Use the **Vehicle** selector to switch between saved vehicles. Selecting a different vehicle immediately starts a new timestamped KML file for that vehicle.
+
 The **Update seconds** value is saved as soon as the number is changed; you do not need to press **Save config** for that field.
+
+Configuration is saved when values change and again when the program closes.
 
 The **Center** button starts active. While active, the map keeps the current browser zoom level and centers on the vehicle when positions arrive. Moving the map automatically deselects **Center**, and incoming positions will no longer recenter the map until **Center** is pressed again.
 
@@ -49,7 +56,9 @@ You can also edit `config.json` directly.
 Each time the program starts, it creates a new timestamped file in `data`, for example:
 
 ```text
-data\track_20260604_153000_123456.kml
+data\track_Default_vehicle_20260604_153000_123456.kml
 ```
 
-You can also click **Download KML** in the web app. Click **New track** to close the current KML file and start writing a new timestamped one.
+File names use the computer's local time. Position timestamps inside the KML file and in the browser popup also use the computer's local time.
+
+You can also click **Download KML** in the web app. Click **New track** to close the current KML file and start writing a new timestamped one for the selected vehicle.
