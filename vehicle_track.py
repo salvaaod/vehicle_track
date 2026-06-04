@@ -587,6 +587,7 @@ HTML_PAGE = """
         <label>Port:
             <input id="device_port" type="number">
         </label>
+        <button onclick="addVehicle()">Add vehicle</button>
 
         <label>Update seconds:
             <input id="update_seconds" type="number" min="1" step="1" oninput="updateSecondsChanged()">
@@ -597,7 +598,6 @@ HTML_PAGE = """
         <button onclick="clearMeasure()" type="button">Clear measure</button>
         <span id="measure_distance_display">Measure: 0 m</span>
         <button onclick="saveConfig()">Save config</button>
-        <button onclick="addVehicle()">Add vehicle</button>
         <button onclick="newTrack()">New track</button>
         <a href="/download-kml">Download KML</a>
         <span id="last_position_display" class="bad">No position received</span>
