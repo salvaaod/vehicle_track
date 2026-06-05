@@ -6,6 +6,7 @@ import re
 import signal
 import threading
 import time
+import unicodedata
 import webbrowser
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -69,7 +70,6 @@ class Tracker:
         self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
         self.config["kml_filename"] = self.session_filename
         self.save_config()
-        self.write_kml()
 
     @staticmethod
     def local_timestamp() -> str:
@@ -77,11 +77,13 @@ class Tracker:
 
     @staticmethod
     def safe_filename_part(value: Any) -> str:
-        cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "vehicle")).strip("._-")
+        normalized = unicodedata.normalize("NFKD", str(value or "vehicle"))
+        ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+        cleaned = re.sub(r"[^A-Za-z0-9]+", "_", ascii_value).strip("_")
         return cleaned or "vehicle"
 
     def create_session_filename(self, vehicle_name: Optional[str] = None) -> str:
-        timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = datetime.now().astimezone().strftime("%y%m%d_%H%M%S")
         vehicle_part = self.safe_filename_part(vehicle_name or self.config.get("selected_vehicle"))
         return f"track_{vehicle_part}_{timestamp}.kml"
 
@@ -261,7 +263,6 @@ class Tracker:
             self.start_new_track_locked()
             self.save_config()
 
-        self.write_kml()
         return self.config.copy()
 
     def select_vehicle(self, name: str) -> Dict[str, Any]:
@@ -269,7 +270,6 @@ class Tracker:
         if not selected_name:
             raise ValueError("Vehicle name is required.")
 
-        should_restart = False
         with self.lock:
             if not any(vehicle["name"] == selected_name for vehicle in self.config["vehicles"]):
                 raise ValueError(f"Unknown vehicle '{selected_name}'.")
@@ -278,12 +278,9 @@ class Tracker:
                 self.config["selected_vehicle"] = selected_name
                 self.sync_selected_vehicle_fields(self.config)
                 self.start_new_track_locked()
-                should_restart = True
 
             self.save_config()
 
-        if should_restart:
-            self.write_kml()
         return self.config.copy()
 
     def poll_once(self) -> None:
@@ -343,6 +340,8 @@ class Tracker:
     def write_kml(self) -> None:
         with self.lock:
             points_copy = list(self.points)
+            if not points_copy:
+                return
             kml_name = self.config.get("kml_filename", KML_FILE.name)
             vehicle_name = self.config.get("selected_vehicle", "Vehicle")
 
@@ -424,8 +423,6 @@ class Tracker:
         with self.lock:
             self.start_new_track_locked()
             self.save_config()
-
-        self.write_kml()
 
     def shutdown(self) -> None:
         with self.lock:

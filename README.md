@@ -41,7 +41,7 @@ You can configure from the web page:
 - Device port
 - Update seconds
 
-Use **Add vehicle** to save a new named vehicle. Use the **Vehicle** selector to switch between saved vehicles. Selecting a different vehicle immediately starts a new timestamped KML file for that vehicle.
+Use **Add vehicle** to save a new named vehicle. Use the **Vehicle** selector to switch between saved vehicles. Selecting a different vehicle immediately prepares a new timestamped KML file name for that vehicle; the file is created after the next valid GPS position arrives.
 
 The **Update seconds** value is saved as soon as the number is changed; you do not need to press **Save config** for that field.
 
@@ -53,12 +53,12 @@ You can also edit the generated `config.json` directly. The file is intentionall
 
 ## KML output
 
-Each time the program starts, it creates a new timestamped file in `data`, for example:
+The app prepares a new timestamped KML file name for each track, but it only creates the file in `data` after the first valid GPS position is received, for example:
 
 ```text
-data\track_Default_vehicle_20260604_153000_123456.kml
+data\track_Default_vehicle_260604_153000.kml
 ```
 
-File names use the computer's local time. Position timestamps inside the KML file and in the browser popup also use the computer's local time.
+File names use the computer's local time in `track_<vehicle>_<YYMMDD>_<HHMMSS>.kml` format. Vehicle names are converted to ASCII-safe file-name parts, so names with accents or special characters, such as `Autónomo`, are written consistently, for example `Autonomo`. Position timestamps inside the KML file and in the browser popup also use the computer's local time.
 
-You can also click **Download KML** in the web app. Click **New track** to close the current KML file and start writing a new timestamped one for the selected vehicle.
+You can also click **Download KML** in the web app. Click **New track** to close the current KML file and prepare a new timestamped name for the selected vehicle; the new file is written after the next valid GPS position arrives.
