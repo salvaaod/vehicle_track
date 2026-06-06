@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     "request_timeout_seconds": 3,
 
     "kml_filename": "track.kml",
-    "recording_enabled": True
+    "recording_enabled": False
 }
 
 
@@ -68,8 +68,8 @@ class Tracker:
         self.last_received_position: Optional[TrackPoint] = None
         self.last_error: Optional[str] = None
         self.running = True
-        self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
-        self.config["kml_filename"] = self.session_filename
+        self.session_filename = self.config.get("kml_filename", KML_FILE.name)
+        self.config["recording_enabled"] = False
         self.save_config()
 
     @staticmethod
@@ -146,6 +146,14 @@ class Tracker:
         return self.normalize_config(copy.deepcopy(DEFAULT_CONFIG))
 
     @staticmethod
+    def parse_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on")
+        return bool(value)
+
+    @staticmethod
     def write_config_file(config: Dict[str, Any]) -> None:
         with CONFIG_FILE.open("w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
@@ -210,7 +218,6 @@ class Tracker:
             "initial_lat": float,
             "initial_lon": float,
             "request_timeout_seconds": float,
-            "recording_enabled": bool,
         }
 
         with self.lock:
@@ -219,16 +226,15 @@ class Tracker:
 
             for key, converter in allowed.items():
                 if key in partial:
-                    value = partial[key]
-                    if converter is bool:
-                        if isinstance(value, bool):
-                            self.config[key] = value
-                        elif isinstance(value, str):
-                            self.config[key] = value.lower() in ("true", "1", "yes", "on")
-                        else:
-                            self.config[key] = bool(value)
-                    else:
-                        self.config[key] = converter(value)
+                    self.config[key] = converter(partial[key])
+
+            if "recording_enabled" in partial:
+                recording_enabled = self.parse_bool(partial["recording_enabled"])
+                was_recording = self.config.get("recording_enabled", False)
+                if recording_enabled and not was_recording:
+                    self.start_recording_locked()
+                else:
+                    self.config["recording_enabled"] = recording_enabled
 
             if self.config["update_seconds"] < 1:
                 self.config["update_seconds"] = 1
@@ -425,9 +431,16 @@ class Tracker:
         self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
         self.config["kml_filename"] = self.session_filename
 
+    def start_recording_locked(self) -> None:
+        self.points = []
+        self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
+        self.config["kml_filename"] = self.session_filename
+        self.config["recording_enabled"] = True
+
     def new_track(self) -> None:
         with self.lock:
             self.start_new_track_locked()
+            self.config["recording_enabled"] = True
             self.save_config()
 
     def shutdown(self) -> None:
@@ -618,7 +631,7 @@ HTML_PAGE = """
         <button onclick="clearMeasure()" type="button">Clear measure</button>
         <span id="measure_distance_display">Measure: 0 m</span>
         <button onclick="saveConfig()">Save config</button>
-        <button id="record_button" class="active" onclick="toggleRecording()" type="button" aria-pressed="true">Record track</button>
+        <button id="record_button" onclick="toggleRecording()" type="button" aria-pressed="false">Record track</button>
         <span id="last_position_display" class="bad">No position received</span>
     </div>
 
