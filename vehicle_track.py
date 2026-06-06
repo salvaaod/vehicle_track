@@ -47,7 +47,8 @@ DEFAULT_CONFIG = {
     "app_port": 5000,
     "request_timeout_seconds": 3,
 
-    "kml_filename": "track.kml"
+    "kml_filename": "track.kml",
+    "recording_enabled": False
 }
 
 
@@ -67,8 +68,8 @@ class Tracker:
         self.last_received_position: Optional[TrackPoint] = None
         self.last_error: Optional[str] = None
         self.running = True
-        self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
-        self.config["kml_filename"] = self.session_filename
+        self.session_filename = self.config.get("kml_filename", KML_FILE.name)
+        self.config["recording_enabled"] = False
         self.save_config()
 
     @staticmethod
@@ -145,6 +146,14 @@ class Tracker:
         return self.normalize_config(copy.deepcopy(DEFAULT_CONFIG))
 
     @staticmethod
+    def parse_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on")
+        return bool(value)
+
+    @staticmethod
     def write_config_file(config: Dict[str, Any]) -> None:
         with CONFIG_FILE.open("w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
@@ -217,16 +226,15 @@ class Tracker:
 
             for key, converter in allowed.items():
                 if key in partial:
-                    value = partial[key]
-                    if converter is bool:
-                        if isinstance(value, bool):
-                            self.config[key] = value
-                        elif isinstance(value, str):
-                            self.config[key] = value.lower() in ("true", "1", "yes", "on")
-                        else:
-                            self.config[key] = bool(value)
-                    else:
-                        self.config[key] = converter(value)
+                    self.config[key] = converter(partial[key])
+
+            if "recording_enabled" in partial:
+                recording_enabled = self.parse_bool(partial["recording_enabled"])
+                was_recording = self.config.get("recording_enabled", False)
+                if recording_enabled and not was_recording:
+                    self.start_recording_locked()
+                else:
+                    self.config["recording_enabled"] = recording_enabled
 
             if self.config["update_seconds"] < 1:
                 self.config["update_seconds"] = 1
@@ -311,13 +319,17 @@ class Tracker:
                     self.last_error = "No position received from device (lat=0 lon=0)"
                 return
 
+            should_write_kml = False
             with self.lock:
                 self.last_position = received_point
                 self.last_received_position = received_point
-                self.points.append(received_point)
+                if self.config.get("recording_enabled", True):
+                    self.points.append(received_point)
+                    should_write_kml = True
                 self.last_error = None
 
-            self.write_kml()
+            if should_write_kml:
+                self.write_kml()
 
         except Exception as exc:
             with self.lock:
@@ -419,9 +431,16 @@ class Tracker:
         self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
         self.config["kml_filename"] = self.session_filename
 
+    def start_recording_locked(self) -> None:
+        self.points = []
+        self.session_filename = self.create_session_filename(self.config.get("selected_vehicle"))
+        self.config["kml_filename"] = self.session_filename
+        self.config["recording_enabled"] = True
+
     def new_track(self) -> None:
         with self.lock:
             self.start_new_track_locked()
+            self.config["recording_enabled"] = True
             self.save_config()
 
     def shutdown(self) -> None:
@@ -469,9 +488,10 @@ HTML_PAGE = """
             background: #202020;
             color: white;
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: center;
             flex-wrap: wrap;
+            row-gap: 8px;
         }
 
         #topbar label {
@@ -479,11 +499,26 @@ HTML_PAGE = """
         }
 
         #topbar input, #topbar select {
-            width: 115px;
             padding: 4px;
         }
 
-        #topbar button, #topbar a {
+        #vehicle_select {
+            max-width: 130px;
+        }
+
+        #vehicle_name {
+            width: 12ch;
+        }
+
+        #device_ip {
+            width: 9ch;
+        }
+
+        #device_port, #update_seconds {
+            width: 5ch;
+        }
+
+        #topbar button {
             padding: 6px 10px;
             border: 0;
             background: #ffffff;
@@ -491,6 +526,7 @@ HTML_PAGE = """
             text-decoration: none;
             cursor: pointer;
             border-radius: 4px;
+            white-space: nowrap;
         }
 
         #topbar button.active {
@@ -595,8 +631,7 @@ HTML_PAGE = """
         <button onclick="clearMeasure()" type="button">Clear measure</button>
         <span id="measure_distance_display">Measure: 0 m</span>
         <button onclick="saveConfig()">Save config</button>
-        <button onclick="newTrack()">New track</button>
-        <a href="/download-kml">Download KML</a>
+        <button id="record_button" onclick="toggleRecording()" type="button" aria-pressed="false">Record track</button>
         <span id="last_position_display" class="bad">No position received</span>
     </div>
 
@@ -617,6 +652,7 @@ HTML_PAGE = """
         let measurePoints = [];
         let measureLine = null;
         let measureMarkers = [];
+        let recordingEnabled = true;
 
         function setStatus(html) {
             document.getElementById("status").innerHTML = html;
@@ -643,6 +679,7 @@ HTML_PAGE = """
             document.getElementById("device_ip").value = cfg.device_ip;
             document.getElementById("device_port").value = cfg.device_port;
             document.getElementById("update_seconds").value = cfg.update_seconds;
+            updateRecordingButton(cfg.recording_enabled !== false);
         }
 
         function formatPosition(value) {
@@ -675,6 +712,14 @@ HTML_PAGE = """
             button.classList.toggle("active", measureEnabled);
             button.setAttribute("aria-pressed", measureEnabled ? "true" : "false");
             document.body.classList.toggle("measure-active", measureEnabled);
+        }
+
+        function updateRecordingButton(enabled) {
+            recordingEnabled = Boolean(enabled);
+            const button = document.getElementById("record_button");
+            button.classList.toggle("active", recordingEnabled);
+            button.setAttribute("aria-pressed", recordingEnabled ? "true" : "false");
+            button.textContent = recordingEnabled ? "Recording track" : "Record track";
         }
 
         function updateLastPositionDisplay(state) {
@@ -806,6 +851,7 @@ HTML_PAGE = """
             statusHtml += "Device URL: " + state.device_url + " | ";
             statusHtml += "Vehicle: " + state.config.selected_vehicle + " | ";
             statusHtml += "Track points: " + state.point_count + " | ";
+            statusHtml += "Recording: " + (state.config.recording_enabled ? "on" : "off") + " | ";
             statusHtml += "KML: " + state.kml_file;
 
             setStatus(statusHtml);
@@ -915,8 +961,14 @@ HTML_PAGE = """
             }
         }
 
-        async function newTrack() {
-            await fetch("/api/new-track", {method: "POST"});
+        async function toggleRecording() {
+            const response = await fetch("/api/config", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({recording_enabled: !recordingEnabled})
+            });
+            const cfg = await response.json();
+            updateRecordingButton(cfg.recording_enabled);
             await refresh();
         }
 
